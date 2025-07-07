@@ -113,6 +113,37 @@ struct ContentView: View {
                         
                         Text("距離: \(formatDistance(route.distance))")
                         Text("所要時間: \(formatTime(route.expectedTravelTime))")
+                        
+                        // 交通手段の表示
+                        HStack {
+                            Text("交通手段: \(viewModel.transportTypeName(viewModel.selectedTransportType))")
+                            
+                            Spacer()
+                            
+                            // 他の交通手段がある場合、切り替えボタンを表示
+                            if viewModel.availableRoutes.count > 1 {
+                                Menu {
+                                    // 交通手段のIDと値のペアを使用して明示的にHashableに準拠させる
+                                    ForEach([
+                                        (id: 0, type: MKDirectionsTransportType.automobile),
+                                        (id: 1, type: MKDirectionsTransportType.walking),
+                                        (id: 2, type: MKDirectionsTransportType.transit)
+                                    ], id: \.id) { pair in
+                                        let type = pair.type
+                                        if viewModel.availableRoutes[TransportTypeKey(type)] != nil && type != viewModel.selectedTransportType {
+                                            Button(action: {
+                                                viewModel.selectTransportType(type)
+                                            }) {
+                                                Label(viewModel.transportTypeName(type), systemImage: transportTypeIcon(type))
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "arrow.triangle.swap")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
                     }
                     .padding()
                     .background(Color.white.opacity(0.8))
@@ -150,6 +181,20 @@ struct ContentView: View {
                     }
                 }
             )
+        }
+    }
+    
+    func transportTypeIcon(_ type: MKDirectionsTransportType) -> String {
+        // Use if-else instead of switch to avoid exhaustiveness warnings
+        if type == .automobile {
+            return "car.fill"
+        } else if type == .walking {
+            return "figure.walk"
+        } else if type == .transit {
+            return "tram.fill"
+        } else {
+            // Handles .any and any future cases
+            return "map"
         }
     }
     

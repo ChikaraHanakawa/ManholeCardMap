@@ -8,6 +8,54 @@ import SwiftUI
 import MapKit
 import CoreLocation
 
+// MKDirectionsTransportTypeはすでにHashableに準拠しています
+// Appleがこの準拠を将来的に追加する場合に備えて、拡張を削除しました
+
+// MKDirectionsTransportType をHashableにするためのラッパー
+struct TransportTypeKey: Hashable {
+    let transportType: MKDirectionsTransportType
+    
+    init(_ transportType: MKDirectionsTransportType) {
+        self.transportType = transportType
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        // MKDirectionsTransportType は整数値を使って区別できる
+        // if-else文を使用して警告を回避
+        let hashValue: Int
+        
+        if transportType == .automobile {
+            hashValue = 1
+        } else if transportType == .walking {
+            hashValue = 2
+        } else if transportType == .transit {
+            hashValue = 3
+        } else if transportType == .any {
+            hashValue = 4
+        } else {
+            // 将来追加される可能性のあるケースに対応
+            hashValue = 0
+        }
+        
+        hasher.combine(hashValue)
+    }
+    
+    static func == (lhs: TransportTypeKey, rhs: TransportTypeKey) -> Bool {
+        // 同じケースであるかどうかを判断 (if-else文を使用して警告を回避)
+        if lhs.transportType == .automobile && rhs.transportType == .automobile {
+            return true
+        } else if lhs.transportType == .walking && rhs.transportType == .walking {
+            return true
+        } else if lhs.transportType == .transit && rhs.transportType == .transit {
+            return true
+        } else if lhs.transportType == .any && rhs.transportType == .any {
+            return true
+        } else {
+            return false
+        }
+    }
+}
+
 struct Location: Identifiable {
     let id = UUID()
     let title: String
@@ -69,6 +117,10 @@ class LocationViewModel: NSObject, ObservableObject {
     // 位置情報の状態を表すプロパティ
     @Published var locationStatus: LocationStatus = .unknown
     
+    // 計算された各交通手段のルートを保持する変数を追加
+    @Published var availableRoutes: [TransportTypeKey: MKRoute] = [:]
+    @Published var selectedTransportType: MKDirectionsTransportType = .automobile
+
     private var locationManager: CLLocationManager!
     
     // 進行中のすべての経路計算リクエストを保持
@@ -93,7 +145,7 @@ class LocationViewModel: NSObject, ObservableObject {
                 return "location.fill"
             case .denied, .restricted:
                 return "location.slash.fill"
-            default:
+            case .unknown, .notDetermined:
                 return "location"
             }
         }
@@ -104,7 +156,7 @@ class LocationViewModel: NSObject, ObservableObject {
                 return .green
             case .denied, .restricted:
                 return .red
-            default:
+            case .unknown, .notDetermined:
                 return .yellow
             }
         }
@@ -299,6 +351,7 @@ class LocationViewModel: NSObject, ObservableObject {
             
             // 既存の経路をクリア
             self.route = nil
+            self.availableRoutes.removeAll()
             
             // 現在地と目的地を道路にスナップする試み
             print("デバッグ: 道路へのスナップを試みています...")
@@ -320,26 +373,70 @@ class LocationViewModel: NSObject, ObservableObject {
                     let sourceMapItem = MKMapItem(placemark: sourcePlacemark)
                     let destinationMapItem = MKMapItem(placemark: destinationPlacemark)
                     
-                    // 最初に自動車での経路を試みる
-                    self.tryCalculateRoute(sourceMapItem: sourceMapItem, destinationMapItem: destinationMapItem, transportType: .automobile) { [weak self] success in
-                        guard let self = self else { return }
-                        
-                        if !success {
-                            // 自動車で失敗した場合は徒歩での経路を試みる
-                            print("自動車での経路検索に失敗しました。徒歩での経路を試みます。")
-                            self.tryCalculateRoute(sourceMapItem: sourceMapItem, destinationMapItem: destinationMapItem, transportType: .walking) { success in
-                                if !success {
-                                    // 徒歩でも失敗した場合
-                                    print("徒歩での経路検索にも失敗しました。")
-                                    DispatchQueue.main.async {
-                                        self.errorMessage = ErrorMessage(message: "経路検索エラー：経路を検索できません。目的地が到達不可能です。")
-                                    }
+                    // 複数の交通手段を試す
+                    let transportTypes: [MKDirectionsTransportType] = [.automobile, .walking, .transit]
+                    var remainingTypesCount = transportTypes.count
+                    var anyRouteFound = false
+                    
+                    // 各交通手段でルート検索を行う
+                    for transportType in transportTypes {
+                        self.tryCalculateRoute(sourceMapItem: sourceMapItem, destinationMapItem: destinationMapItem, transportType: transportType) { [weak self] success, route in
+                            guard let self = self else { return }
+                            
+                            remainingTypesCount -= 1
+                            
+                            if success, let route = route {
+                                anyRouteFound = true
+                                self.availableRoutes[TransportTypeKey(transportType)] = route
+                                
+                                // すべての交通手段を試し終わった場合、最速のルートを選択
+                                if remainingTypesCount == 0 {
+                                    self.selectFastestRoute()
+                                }
+                            }
+                            
+                            // すべての交通手段を試し終わり、どのルートも見つからなかった場合
+                            if remainingTypesCount == 0 && !anyRouteFound {
+                                DispatchQueue.main.async {
+                                    self.errorMessage = ErrorMessage(message: "経路検索エラー：経路を検索できません。目的地が到達不可能です。")
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+    
+    func selectFastestRoute() {
+        guard !availableRoutes.isEmpty else {
+            print("利用可能なルートがありません")
+            return
+        }
+        
+        // 利用可能なルートの情報をログに出力
+        print("デバッグ: 利用可能なルート一覧:")
+        for (typeKey, route) in availableRoutes {
+            let distance = String(format: "%.1f", route.distance / 1000)
+            let time = Int(route.expectedTravelTime / 60)
+            print("- \(transportTypeName(typeKey.transportType)): 距離 \(distance)km, 所要時間 \(time)分")
+        }
+        
+        // 最速のルートを探す
+        var fastestRoute: (type: MKDirectionsTransportType, route: MKRoute)? = nil
+        
+        for (typeKey, route) in availableRoutes {
+            if fastestRoute == nil || route.expectedTravelTime < fastestRoute!.route.expectedTravelTime {
+                fastestRoute = (typeKey.transportType, route)
+            }
+        }
+        
+        if let fastest = fastestRoute {
+            let distance = String(format: "%.1f", fastest.route.distance / 1000)
+            let time = Int(fastest.route.expectedTravelTime / 60)
+            print("デバッグ: 最速のルート - 交通手段: \(transportTypeName(fastest.type)), 距離: \(distance)km, 予想所要時間: \(time)分")
+            self.route = fastest.route
+            self.selectedTransportType = fastest.type
         }
     }
     
@@ -357,7 +454,20 @@ class LocationViewModel: NSObject, ObservableObject {
         }
     }
     
-    func tryCalculateRoute(sourceMapItem: MKMapItem, destinationMapItem: MKMapItem, transportType: MKDirectionsTransportType, completion: @escaping (Bool) -> Void) {
+    // 特定の交通手段を手動で選択するメソッド
+    func selectTransportType(_ type: MKDirectionsTransportType) {
+        guard let route = availableRoutes[TransportTypeKey(type)] else {
+            print("指定された交通手段 (\(transportTypeName(type))) のルートは利用できません")
+            errorMessage = ErrorMessage(message: "\(transportTypeName(type))でのルートは利用できません")
+            return
+        }
+        
+        print("交通手段を変更: \(transportTypeName(type))")
+        self.route = route
+        self.selectedTransportType = type
+    }
+    
+    func tryCalculateRoute(sourceMapItem: MKMapItem, destinationMapItem: MKMapItem, transportType: MKDirectionsTransportType, completion: @escaping (Bool, MKRoute?) -> Void) {
         let request = MKDirections.Request()
         request.source = sourceMapItem
         request.destination = destinationMapItem
@@ -371,7 +481,7 @@ class LocationViewModel: NSObject, ObservableObject {
         
         directions.calculate { [weak self] response, error in
             guard let self = self else {
-                completion(false)
+                completion(false, nil)
                 return
             }
             
@@ -382,24 +492,23 @@ class LocationViewModel: NSObject, ObservableObject {
             
             if let error = error {
                 print("経路検索エラー (\(transportType)): \(error)")
-                completion(false)
+                completion(false, nil)
                 return
             }
             
             guard let response = response, !response.routes.isEmpty else {
                 print("経路が見つかりませんでした (\(transportType))")
-                completion(false)
+                completion(false, nil)
                 return
             }
             
-            // 成功した場合、最短ルートを選択
-            DispatchQueue.main.async {
-                if let bestRoute = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) {
-                    self.route = bestRoute
-                } else {
-                    self.route = response.routes.first
-                }
-                completion(true)
+            // 交通手段ごとに最速ルートを選択
+            if let bestRoute = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) {
+                print("デバッグ: \(transportType)での経路が見つかりました - 予想所要時間: \(Int(bestRoute.expectedTravelTime / 60))分")
+                completion(true, bestRoute)
+            } else {
+                print("デバッグ: \(transportType)での経路が見つかりました")
+                completion(true, response.routes.first)
             }
         }
     }
@@ -438,6 +547,22 @@ class LocationViewModel: NSObject, ObservableObject {
             }
             
             completion(nearestItem.placemark.coordinate)
+        }
+    }
+    
+    // 交通手段の名前を取得するヘルパーメソッド
+    func transportTypeName(_ type: MKDirectionsTransportType) -> String {
+        // if-else文を使用して警告を回避
+        if type == .automobile {
+            return "車"
+        } else if type == .walking {
+            return "徒歩"
+        } else if type == .transit {
+            return "公共交通機関"
+        } else if type == .any {
+            return "任意"
+        } else {
+            return "不明"
         }
     }
     
