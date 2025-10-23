@@ -298,50 +298,58 @@ class LocationViewModel: NSObject, ObservableObject {
     }
     
     func calculateRoute() {
+        print("デバッグ: calculateRoute() が呼び出されました")
+        
         // 新しい経路計算を始める前に、以前のリクエストをすべてキャンセル
         cancelAllDirectionsRequests()
         cancelAllLocalSearchRequests()
         
         // 現在位置の確認とデバッグ情報の出力
-        if userLocation == nil {
-            print("デバッグ: 現在位置が取得できていません")
-            errorMessage = ErrorMessage(message: "現在地を特定できません。位置情報の使用を許可して、GPSの電波が届く場所にいることを確認してください。")
+        guard let userLocation = userLocation else {
+            print("デバッグ: 現在位置が取得できていません - locationStatus: \(locationStatus)")
+            errorMessage = ErrorMessage(message: "現在地を特定できません。位置情報の使用を許可して、GPSの電波が届く場所にいることを確認してください。\n\n現在の状態: \(locationStatus.description)")
             return
         }
         
-        if selectedLocation == nil {
+        guard let selectedLocation = selectedLocation else {
             print("デバッグ: 目的地が選択されていません")
             errorMessage = ErrorMessage(message: "目的地が設定されていません。マンホールカード一覧から目的地を選択してください。")
             return
         }
         
-        guard let userLocation = userLocation, let selectedLocation = selectedLocation else {
-            errorMessage = ErrorMessage(message: "現在地または目的地が設定されていません")
-            return
-        }
-        
         print("デバッグ: 現在位置 - 緯度: \(userLocation.latitude), 経度: \(userLocation.longitude)")
-        print("デバッグ: 目的地 - 緯度: \(selectedLocation.coordinate.latitude), 経度: \(selectedLocation.coordinate.longitude)")
+        print("デバッグ: 目的地 - \(selectedLocation.title) - 緯度: \(selectedLocation.coordinate.latitude), 経度: \(selectedLocation.coordinate.longitude)")
         
         // 座標が有効かチェック
-        if !CLLocationCoordinate2DIsValid(userLocation) || !CLLocationCoordinate2DIsValid(selectedLocation.coordinate) {
-            errorMessage = ErrorMessage(message: "無効な座標があります")
+        if !CLLocationCoordinate2DIsValid(userLocation) {
+            print("デバッグ: 現在位置の座標が無効です")
+            errorMessage = ErrorMessage(message: "現在地の座標が無効です")
             return
         }
         
-        // 距離が近すぎる場合は警告（10メートル以内）
+        if !CLLocationCoordinate2DIsValid(selectedLocation.coordinate) {
+            print("デバッグ: 目的地の座標が無効です")
+            errorMessage = ErrorMessage(message: "目的地の座標が無効です")
+            return
+        }
+        
+        // 距離の計算と検証
         let startLocation = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
         let endLocation = CLLocation(latitude: selectedLocation.coordinate.latitude, longitude: selectedLocation.coordinate.longitude)
+        let distanceInMeters = startLocation.distance(from: endLocation)
+        let distanceInKm = distanceInMeters / 1000
         
-        if startLocation.distance(from: endLocation) < 10 {
-            errorMessage = ErrorMessage(message: "現在地と目的地が近すぎます")
+        print("デバッグ: 直線距離 - \(String(format: "%.2f", distanceInKm))km (\(String(format: "%.0f", distanceInMeters))m)")
+        
+        // 距離が近すぎる場合は警告（50メートル以内）
+        if distanceInMeters < 50 {
+            errorMessage = ErrorMessage(message: "現在地と目的地が近すぎます（\(String(format: "%.0f", distanceInMeters))m）。もう少し離れた場所を選択してください。")
             return
         }
         
-        // 直線距離をチェック - 極端に離れている場合は警告
-        let distanceInKm = startLocation.distance(from: endLocation) / 1000
-        if distanceInKm > 300 { // 300km以上離れている場合
-            errorMessage = ErrorMessage(message: "目的地が遠すぎます（約\(Int(distanceInKm))km）。経路検索できない可能性があります。")
+        // 距離が遠すぎる場合は警告（500km以上）
+        if distanceInKm > 500 {
+            errorMessage = ErrorMessage(message: "目的地が遠すぎます（約\(String(format: "%.0f", distanceInKm))km）。経路検索に時間がかかるか、失敗する可能性があります。")
             // 警告を表示するが、経路検索は続行する
         }
         
@@ -349,57 +357,55 @@ class LocationViewModel: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
+            print("デバッグ: 経路計算を開始します")
+            
             // 既存の経路をクリア
             self.route = nil
             self.availableRoutes.removeAll()
             
-            // 現在地と目的地を道路にスナップする試み
-            print("デバッグ: 道路へのスナップを試みています...")
-            self.snapToRoad(coordinate: userLocation) { snappedUserLocation in
-                let finalUserLocation = snappedUserLocation ?? userLocation
-                if snappedUserLocation != nil {
-                    print("デバッグ: 現在地を道路にスナップしました - 緯度: \(finalUserLocation.latitude), 経度: \(finalUserLocation.longitude)")
-                }
+            let sourcePlacemark = MKPlacemark(coordinate: userLocation, addressDictionary: nil)
+            let destinationPlacemark = MKPlacemark(coordinate: selectedLocation.coordinate, addressDictionary: nil)
+            
+            let sourceMapItem = MKMapItem(placemark: sourcePlacemark)
+            let destinationMapItem = MKMapItem(placemark: destinationPlacemark)
+            
+            // 複数の交通手段を試す（優先順位順）
+            let transportTypes: [MKDirectionsTransportType] = [.automobile, .walking, .transit]
+            var completedCount = 0
+            var anyRouteFound = false
+            var errorCount = 0
+            
+            print("デバッグ: \(transportTypes.count)種類の交通手段で経路検索を試行します")
+            
+            // 各交通手段でルート検索を行う
+            for (_, transportType) in transportTypes.enumerated() {
+                print("デバッグ: \(transportTypeName(transportType))での経路検索を開始")
                 
-                self.snapToRoad(coordinate: selectedLocation.coordinate) { snappedDestLocation in
-                    let finalDestLocation = snappedDestLocation ?? selectedLocation.coordinate
-                    if snappedDestLocation != nil {
-                        print("デバッグ: 目的地を道路にスナップしました - 緯度: \(finalDestLocation.latitude), 経度: \(finalDestLocation.longitude)")
+                self.tryCalculateRoute(sourceMapItem: sourceMapItem, destinationMapItem: destinationMapItem, transportType: transportType) { [weak self] success, route in
+                    guard let self = self else { return }
+                    
+                    completedCount += 1
+                    print("デバッグ: \(transportTypeName(transportType))の結果 - 成功: \(success), 完了数: \(completedCount)/\(transportTypes.count)")
+                    
+                    if success, let route = route {
+                        anyRouteFound = true
+                        self.availableRoutes[TransportTypeKey(transportType)] = route
+                        print("デバッグ: \(transportTypeName(transportType))のルートを保存しました")
+                    } else {
+                        errorCount += 1
+                        print("デバッグ: \(transportTypeName(transportType))の経路検索に失敗しました")
                     }
                     
-                    let sourcePlacemark = MKPlacemark(coordinate: finalUserLocation, addressDictionary: nil)
-                    let destinationPlacemark = MKPlacemark(coordinate: finalDestLocation, addressDictionary: nil)
-                    
-                    let sourceMapItem = MKMapItem(placemark: sourcePlacemark)
-                    let destinationMapItem = MKMapItem(placemark: destinationPlacemark)
-                    
-                    // 複数の交通手段を試す
-                    let transportTypes: [MKDirectionsTransportType] = [.automobile, .walking, .transit]
-                    var remainingTypesCount = transportTypes.count
-                    var anyRouteFound = false
-                    
-                    // 各交通手段でルート検索を行う
-                    for transportType in transportTypes {
-                        self.tryCalculateRoute(sourceMapItem: sourceMapItem, destinationMapItem: destinationMapItem, transportType: transportType) { [weak self] success, route in
-                            guard let self = self else { return }
-                            
-                            remainingTypesCount -= 1
-                            
-                            if success, let route = route {
-                                anyRouteFound = true
-                                self.availableRoutes[TransportTypeKey(transportType)] = route
-                                
-                                // すべての交通手段を試し終わった場合、最速のルートを選択
-                                if remainingTypesCount == 0 {
-                                    self.selectFastestRoute()
-                                }
-                            }
-                            
-                            // すべての交通手段を試し終わり、どのルートも見つからなかった場合
-                            if remainingTypesCount == 0 && !anyRouteFound {
-                                DispatchQueue.main.async {
-                                    self.errorMessage = ErrorMessage(message: "経路検索エラー：経路を検索できません。目的地が到達不可能です。")
-                                }
+                    // すべての交通手段を試し終わった場合
+                    if completedCount == transportTypes.count {
+                        print("デバッグ: すべての交通手段の検索が完了 - 成功: \(anyRouteFound), エラー数: \(errorCount)")
+                        
+                        if anyRouteFound {
+                            self.selectFastestRoute()
+                        } else {
+                            DispatchQueue.main.async {
+                                let errorMsg = "経路を見つけることができませんでした。\n\n考えられる原因:\n• ネットワーク接続の問題\n• 目的地が到達不可能\n• Mapサービスの一時的な問題\n\n距離: \(String(format: "%.1f", distanceInKm))km"
+                                self.errorMessage = ErrorMessage(message: errorMsg)
                             }
                         }
                     }
@@ -467,17 +473,36 @@ class LocationViewModel: NSObject, ObservableObject {
         self.selectedTransportType = type
     }
     
+    // 経路をクリアするメソッド
+    func clearRoute() {
+        print("デバッグ: 経路をクリアします")
+        
+        // すべての経路関連データをクリア
+        route = nil
+        availableRoutes.removeAll()
+        selectedLocation = nil
+        
+        // 進行中のリクエストもキャンセル
+        cancelAllDirectionsRequests()
+        cancelAllLocalSearchRequests()
+        
+        // エラーメッセージもクリア
+        errorMessage = nil
+    }
+    
     func tryCalculateRoute(sourceMapItem: MKMapItem, destinationMapItem: MKMapItem, transportType: MKDirectionsTransportType, completion: @escaping (Bool, MKRoute?) -> Void) {
         let request = MKDirections.Request()
         request.source = sourceMapItem
         request.destination = destinationMapItem
         request.transportType = transportType
-        request.requestsAlternateRoutes = true
+        request.requestsAlternateRoutes = false  // 最初は代替ルートを無効にして高速化
         
         let directions = MKDirections(request: request)
         
         // リクエストリストに追加して追跡
         directionsRequests.append(directions)
+        
+        print("デバッグ: \(transportTypeName(transportType))の経路計算リクエストを送信")
         
         directions.calculate { [weak self] response, error in
             guard let self = self else {
@@ -491,25 +516,23 @@ class LocationViewModel: NSObject, ObservableObject {
             }
             
             if let error = error {
-                print("経路検索エラー (\(transportType)): \(error)")
+                print("デバッグ: \(transportTypeName(transportType))の経路検索エラー - \(error.localizedDescription)")
                 completion(false, nil)
                 return
             }
             
             guard let response = response, !response.routes.isEmpty else {
-                print("経路が見つかりませんでした (\(transportType))")
+                print("デバッグ: \(transportTypeName(transportType))の経路が見つかりませんでした")
                 completion(false, nil)
                 return
             }
             
-            // 交通手段ごとに最速ルートを選択
-            if let bestRoute = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) {
-                print("デバッグ: \(transportType)での経路が見つかりました - 予想所要時間: \(Int(bestRoute.expectedTravelTime / 60))分")
-                completion(true, bestRoute)
-            } else {
-                print("デバッグ: \(transportType)での経路が見つかりました")
-                completion(true, response.routes.first)
-            }
+            let bestRoute = response.routes.first!
+            let distance = String(format: "%.1f", bestRoute.distance / 1000)
+            let time = Int(bestRoute.expectedTravelTime / 60)
+            print("デバッグ: \(transportTypeName(transportType))の経路取得成功 - 距離: \(distance)km, 時間: \(time)分")
+            
+            completion(true, bestRoute)
         }
     }
     

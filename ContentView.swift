@@ -11,18 +11,23 @@ struct ContentView: View {
     @StateObject private var viewModel = LocationViewModel()
     @State private var position: MapCameraPosition = .automatic
     @State private var showLocationList = false
+    @State private var showDebugInfo = false
+    @State private var showAllMarkers = true // マーカー表示制御用
     
     var body: some View {
         ZStack {
             Map(position: $position) {
                 // マンホールカードの位置を地域ごとに色分け
+                // 経路表示中は選択された場所以外のマーカーを非表示にするオプション
                 ForEach(viewModel.locations) { location in
-                    if viewModel.selectedLocation?.id == location.id {
-                        Marker(location.title, coordinate: location.coordinate)
-                            .tint(.red) // 選択中は赤色
-                    } else {
-                        Marker(location.title, coordinate: location.coordinate)
-                            .tint(location.region.color)
+                    if showAllMarkers || viewModel.selectedLocation?.id == location.id {
+                        if viewModel.selectedLocation?.id == location.id {
+                            Marker(location.title, coordinate: location.coordinate)
+                                .tint(.red) // 選択中は赤色
+                        } else {
+                            Marker(location.title, coordinate: location.coordinate)
+                                .tint(location.region.color)
+                        }
                     }
                 }
                 
@@ -51,7 +56,7 @@ struct ContentView: View {
                 // 改良版ユーザーの現在地表示
                 UserAnnotation()
             }
-            .mapStyle(.standard) // マップスタイルを明示的に指定
+            .mapStyle(.standard)
             .mapControls {
                 // コントロールの位置を調整（中央よりに配置）
                 MapUserLocationButton()
@@ -71,36 +76,103 @@ struct ContentView: View {
                         span: MKCoordinateSpan(latitudeDelta: 5.0, longitudeDelta: 5.0)
                     )
                 )
+                
+                // デバッグ: 位置情報の状態を確認
+                print("デバッグ: アプリ起動時の位置情報状態 - \(viewModel.locationStatus)")
+            }
+            .onChange(of: viewModel.route) { _, newRoute in
+                // 経路が更新されたときの処理
+                if let route = newRoute {
+                    // 経路表示時は他のマーカーを非表示にする
+                    showAllMarkers = false
+                    
+                    // 経路全体が見えるようにカメラ位置を調整
+                    let rect = route.polyline.boundingMapRect
+                    let region = MKCoordinateRegion(rect)
+                    
+                    // 少し余裕を持たせるためにspanを拡大
+                    let expandedRegion = MKCoordinateRegion(
+                        center: region.center,
+                        span: MKCoordinateSpan(
+                            latitudeDelta: region.span.latitudeDelta * 1.3,
+                            longitudeDelta: region.span.longitudeDelta * 1.3
+                        )
+                    )
+                    
+                    // アニメーション付きでカメラ位置を更新
+                    withAnimation(.easeInOut(duration: 1.0)) {
+                        position = .region(expandedRegion)
+                    }
+                } else {
+                    // 経路がクリアされたときは全マーカーを表示
+                    showAllMarkers = true
+                }
             }
             
             VStack {
-                // 位置情報の状態を表示するインジケーター
-                if viewModel.userLocation != nil {
+                // 位置情報とデバッグ情報の表示
+                VStack(spacing: 4) {
                     HStack {
-                        Image(systemName: "location.fill")
-                            .foregroundColor(.green)
-                        Text("位置情報: 取得済み")
+                        Image(systemName: viewModel.locationStatus.icon)
+                            .foregroundColor(viewModel.locationStatus.color)
+                        Text("位置情報: \(viewModel.locationStatus.description)")
                             .font(.system(size: 12))
+                        
                         Spacer()
+                        
+                        // マーカー表示切り替えボタン（経路表示中のみ表示）
+                        if viewModel.route != nil {
+                            Button(action: {
+                                showAllMarkers.toggle()
+                            }) {
+                                Image(systemName: showAllMarkers ? "eye.fill" : "eye.slash.fill")
+                                    .foregroundColor(showAllMarkers ? .green : .gray)
+                            }
+                        }
+                        
+                        // デバッグ情報トグルボタン
+                        Button(action: {
+                            showDebugInfo.toggle()
+                        }) {
+                            Image(systemName: "info.circle")
+                                .foregroundColor(.blue)
+                        }
                     }
                     .padding(8)
-                    .background(Color.white.opacity(0.8))
+                    .background(Color.white.opacity(0.9))
                     .cornerRadius(5)
                     .padding(.horizontal)
                     .padding(.top, 5)
-                } else {
-                    HStack {
-                        Image(systemName: "location.slash.fill")
-                            .foregroundColor(.red)
-                        Text("位置情報: 未取得")
-                            .font(.system(size: 12))
-                        Spacer()
+                    
+                    // デバッグ情報の表示
+                    if showDebugInfo {
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let userLocation = viewModel.userLocation {
+                                Text("現在地: \(String(format: "%.4f", userLocation.latitude)), \(String(format: "%.4f", userLocation.longitude))")
+                                    .font(.system(size: 10))
+                            } else {
+                                Text("現在地: 未取得")
+                                    .font(.system(size: 10))
+                            }
+                            
+                            if let selectedLocation = viewModel.selectedLocation {
+                                Text("目的地: \(selectedLocation.title)")
+                                    .font(.system(size: 10))
+                                Text("座標: \(String(format: "%.4f", selectedLocation.coordinate.latitude)), \(String(format: "%.4f", selectedLocation.coordinate.longitude))")
+                                    .font(.system(size: 10))
+                            } else {
+                                Text("目的地: 未選択")
+                                    .font(.system(size: 10))
+                            }
+                            
+                            Text("利用可能ルート: \(viewModel.availableRoutes.count)件")
+                                .font(.system(size: 10))
+                        }
+                        .padding(8)
+                        .background(Color.gray.opacity(0.1))
+                        .cornerRadius(5)
+                        .padding(.horizontal)
                     }
-                    .padding(8)
-                    .background(Color.white.opacity(0.8))
-                    .cornerRadius(5)
-                    .padding(.horizontal)
-                    .padding(.top, 5)
                 }
                 
                 Spacer()
@@ -108,8 +180,31 @@ struct ContentView: View {
                 // 経路情報表示エリア
                 if let route = viewModel.route {
                     VStack(alignment: .leading) {
-                        Text("\(viewModel.selectedLocation?.title ?? "目的地") までの経路")
-                            .font(.headline)
+                        HStack {
+                            Text("\(viewModel.selectedLocation?.title ?? "目的地") までの経路")
+                                .font(.headline)
+                            
+                            Spacer()
+                            
+                            // 経路をクリアするボタン
+                            Button(action: {
+                                viewModel.clearRoute()
+                                showAllMarkers = true
+                                
+                                // 日本全体に戻る
+                                withAnimation(.easeInOut(duration: 1.0)) {
+                                    position = .region(
+                                        MKCoordinateRegion(
+                                            center: CLLocationCoordinate2D(latitude: 35.6812, longitude: 139.7671),
+                                            span: MKCoordinateSpan(latitudeDelta: 5.0, longitudeDelta: 5.0)
+                                        )
+                                    )
+                                }
+                            }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                            }
+                        }
                         
                         Text("距離: \(formatDistance(route.distance))")
                         Text("所要時間: \(formatTime(route.expectedTravelTime))")
@@ -175,7 +270,6 @@ struct ContentView: View {
                 message: Text(errorMessage.message),
                 primaryButton: .default(Text("OK")),
                 secondaryButton: .cancel(Text("別の場所を選択")) {
-                    // アラートを閉じた後、少し遅延させてから場所リストを表示
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         showLocationList = true
                     }

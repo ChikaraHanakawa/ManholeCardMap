@@ -12,8 +12,6 @@ struct ManholeCardMapApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                // フォント関連の問題を回避するためにデフォルトフォントを指定
-                .environment(\.font, Font.system(.body))
         }
     }
 }
