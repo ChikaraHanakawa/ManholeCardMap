@@ -102,6 +102,46 @@ enum Region: String {
     }
 }
 
+// JSON読み込み用の構造体
+struct ManholeCardData: Codable {
+    let municipality: String
+    let series: String
+    let publicationDate: String
+    let distributions: [Distribution]
+    
+    enum CodingKeys: String, CodingKey {
+        case municipality
+        case series
+        case publicationDate = "publication_date"
+        case distributions
+    }
+}
+
+struct Distribution: Codable {
+    let type: String
+    let place: String
+    let address: String
+    let telephone: String
+    let distributionTime: String
+    let location: LocationCoordinate
+    let note: String
+    
+    enum CodingKeys: String, CodingKey {
+        case type
+        case place
+        case address
+        case telephone
+        case distributionTime = "distribution_time"
+        case location
+        case note
+    }
+}
+
+struct LocationCoordinate: Codable {
+    let lon: Double
+    let lat: Double
+}
+
 struct ErrorMessage: Identifiable {
     let id = UUID()
     let message: String
@@ -213,10 +253,10 @@ class LocationViewModel: NSObject, ObservableObject {
         return .unknown
     }
     
-    // CSVファイルが見つからない場合のサンプルデータ
+    // JSONファイルが見つからない場合のサンプルデータ
     func loadSampleData() {
-        // CSV読み込みを試みる
-        if !loadCSV() {
+        // JSON読み込みを試みる
+        if !loadJSON() {
             // 失敗した場合はサンプルデータを使用
             print("サンプルデータを使用します")
             
@@ -295,6 +335,67 @@ class LocationViewModel: NSObject, ObservableObject {
             print("CSVファイルが見つかりません")
             return false
         }
+    }
+    
+    func loadJSON() -> Bool {
+        // manholecard-lists.jsonファイルを読み込む
+        if let path = Bundle.main.path(forResource: "manholecard-lists", ofType: "json") {
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                let decoder = JSONDecoder()
+                let manholeCards = try decoder.decode([ManholeCardData].self, from: data)
+                
+                for card in manholeCards {
+                    for distribution in card.distributions {
+                        // addressから都道府県を抽出
+                        let prefecture = extractPrefecture(from: distribution.address)
+                        let region = getRegion(from: prefecture)
+                        
+                        let location = Location(
+                            title: distribution.place,
+                            coordinate: CLLocationCoordinate2D(
+                                latitude: distribution.location.lat,
+                                longitude: distribution.location.lon
+                            ),
+                            prefecture: prefecture,
+                            region: region
+                        )
+                        locations.append(location)
+                    }
+                }
+                
+                print("JSON読み込み成功: \(locations.count)件のマンホールカード")
+                return true
+            } catch {
+                print("JSON読み込みエラー: \(error)")
+                return false
+            }
+        } else {
+            print("JSONファイルが見つかりません")
+            return false
+        }
+    }
+    
+    // 住所から都道府県を抽出するヘルパーメソッド
+    func extractPrefecture(from address: String) -> String {
+        let prefectures = [
+            "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",
+            "茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県",
+            "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県",
+            "岐阜県", "静岡県", "愛知県", "三重県", "滋賀県", "京都府",
+            "大阪府", "兵庫県", "奈良県", "和歌山県", "鳥取県", "島根県",
+            "岡山県", "広島県", "山口県", "徳島県", "香川県", "愛媛県",
+            "高知県", "福岡県", "佐賀県", "長崎県", "熊本県", "大分県",
+            "宮崎県", "鹿児島県", "沖縄県"
+        ]
+        
+        for prefecture in prefectures {
+            if address.contains(prefecture) {
+                return prefecture
+            }
+        }
+        
+        return "不明"
     }
     
     func calculateRoute() {
